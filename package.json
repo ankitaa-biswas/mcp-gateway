@@ -1,0 +1,23 @@
+{
+  "name": "mcp-gateway",
+  "version": "1.0.0",
+  "description": "Multi-Tenant Enterprise MCP Gateway — full-stack monorepo",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently --names \"backend,frontend\" --prefix-colors \"cyan,magenta\" \"npm run dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
+    "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
+    "lint": "npm run lint --workspace=backend && npm run lint --workspace=frontend",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\" --ignore-path .prettierignore",
+    "clean": "rimraf backend/dist frontend/dist"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.2.5",
+    "rimraf": "^5.0.5",
+    "eslint": "^8.57.0"
+  }
+}
