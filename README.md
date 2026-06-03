@@ -54,6 +54,13 @@ When testing the **Proxy Layer** (`POST /api/proxy/:serverId/call`), please note
 3. **The 502 Bad Gateway**: The gateway will attempt to proxy the request to a mock URL (e.g., `http://localhost:8002`). Because there is no server running there, it will return a `502 Bad Gateway`. 
 4. **Conclusion**: This `502` error successfully proves the Gateway received the request, authenticated it, passed all safety checks, retrieved credentials, and attempted forwarding! 
 
+###  Bonus: Run the included Mock AI Server
+If you want to test the absolute full end-to-end flow without getting a 502 error, I have included a miniature Mock AI Server script. 
+1. Open a new terminal and run: `npx -w backend ts-node-dev src/scripts/mockAiServer.ts`
+2. Go to the UI -> **Admin Panel -> Manage Servers** and add a server with Base URL: `http://localhost:8002`.
+3. The Gateway will instantly hit the mock server's `/schema` endpoint and dynamically save its tools!
+4. Go to **Credentials**, save the API Key `test-key-123`, and execute a tool from the Dashboard for a 100% successful proxy response!
+
 ---
 
 ## API Reference
