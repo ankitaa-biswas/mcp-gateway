@@ -29,8 +29,9 @@ vaultRouter.post('/store', (req: AuthRequest, res: Response, next: NextFunction)
   try {
     const { server_id, api_key } = StoreKeySchema.parse(req.body);
     const userId = req.user!.userId;
+    const tenantId = req.user!.tenantId;
 
-    const result = storeKey(userId, server_id, api_key);
+    const result = storeKey(userId, server_id, api_key, tenantId);
 
     res.status(201).json({
       message: 'API key encrypted and stored successfully',

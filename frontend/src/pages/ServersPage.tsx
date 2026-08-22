@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '@/lib/api';
 import toast from 'react-hot-toast';
 import { Server, Plus, Trash2, Loader2, Globe, Zap } from 'lucide-react';
+import { useAuthStore } from '@/store/authStore';
 
 interface McpServer {
   id: string;
@@ -17,6 +18,8 @@ export function ServersPage() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', base_url: '', api_key: '', capabilities: '' });
   const queryClient = useQueryClient();
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === 'admin';
 
   const { data: servers = [], isLoading: loading } = useQuery<McpServer[]>({
     queryKey: ['servers'],
@@ -79,14 +82,16 @@ export function ServersPage() {
           <h1 className="text-2xl font-bold text-white">MCP Servers</h1>
           <p className="text-gray-500 text-sm mt-1">Manage connected Model Context Protocol providers</p>
         </div>
-        <button id="add-server-btn" onClick={() => setShowForm(!showForm)} className="btn-primary">
-          <Plus className="w-4 h-4" />
-          Add Server
-        </button>
+        {isAdmin && (
+          <button id="add-server-btn" onClick={() => setShowForm(!showForm)} className="btn-primary">
+            <Plus className="w-4 h-4" />
+            Add Server
+          </button>
+        )}
       </div>
 
       {/* Add form */}
-      {showForm && (
+      {showForm && isAdmin && (
         <div className="card animate-fade-in">
           <h2 className="text-base font-semibold text-white mb-4">Register New MCP Server</h2>
           <form onSubmit={handleAdd} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -130,9 +135,11 @@ export function ServersPage() {
         <div className="card text-center py-12">
           <Server className="w-12 h-12 text-gray-700 mx-auto mb-3" />
           <p className="text-gray-500">No MCP servers connected yet.</p>
-          <button onClick={() => setShowForm(true)} className="btn-primary mx-auto mt-4">
-            <Plus className="w-4 h-4" /> Add your first server
-          </button>
+          {isAdmin && (
+            <button onClick={() => setShowForm(true)} className="btn-primary mx-auto mt-4">
+              <Plus className="w-4 h-4" /> Add your first server
+            </button>
+          )}
         </div>
       ) : (
         <div className="grid gap-4">
@@ -161,13 +168,15 @@ export function ServersPage() {
                   </div>
                 )}
               </div>
-              <button
-                onClick={() => handleDelete(server.id)}
-                className="btn-danger p-2 flex-shrink-0"
-                title="Remove server"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={() => handleDelete(server.id)}
+                  className="btn-danger p-2 flex-shrink-0"
+                  title="Remove server"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
             </div>
           ))}
         </div>

@@ -23,7 +23,7 @@ const LoginSchema = z.object({
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function hashPassword(password: string): string {
-  return crypto.createHash('sha256').update(password + (process.env['PASSWORD_SALT'] || 'mcp-salt')).digest('hex');
+  return crypto.createHash('sha256').update(password + (process.env['PASSWORD_SALT'] || 'mcp-dev-salt')).digest('hex');
 }
 
 function toSlug(name: string): string {
@@ -62,7 +62,15 @@ authRouter.post('/register', async (req: Request, res: Response, next: NextFunct
       token,
       tenant: { id: tenantId, name: tenantName, slug },
     });
-  } catch (err) {
+  } catch (err: any) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      if (err.message.includes('tenants.slug') || err.message.includes('tenants.name')) {
+        return next(new AppError(409, 'A tenant with this name already exists.'));
+      }
+      if (err.message.includes('users.email')) {
+        return next(new AppError(409, 'A user with this email already exists in this tenant.'));
+      }
+    }
     next(err);
   }
 });

@@ -54,6 +54,15 @@ interface WindowEntry {
 }
 const rateLimitStore = new Map<string, WindowEntry>();
 
+/**
+ * TEST-ONLY: clears all rate-limit counters.
+ * Only available when NODE_ENV==='test' to avoid accidental use in production.
+ */
+export function __resetRateLimitStore(): void {
+  if (process.env['NODE_ENV'] !== 'test') return;
+  rateLimitStore.clear();
+}
+
 function checkRateLimit(userId: string): RateLimitInfo {
   const now = Date.now();
   const entry = rateLimitStore.get(userId);

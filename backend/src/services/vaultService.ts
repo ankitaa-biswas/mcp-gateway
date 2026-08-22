@@ -99,13 +99,14 @@ interface CredentialRow {
  * Encrypt `apiKey` and persist it for `userId` / `serverId`.
  * Upserts — if a credential already exists it is replaced atomically.
  */
-export function storeKey(userId: string, serverId: string, apiKey: string): { id: string } {
+export function storeKey(userId: string, serverId: string, apiKey: string, tenantId?: string): { id: string } {
   const db = getDatabase();
 
   // Verify the server belongs to the user's tenant via a joined lookup
-  const server = db
-    .prepare('SELECT id FROM mcp_servers WHERE id = ?')
-    .get(serverId) as { id: string } | undefined;
+  const query = tenantId
+    ? db.prepare('SELECT id FROM mcp_servers WHERE id = ? AND tenant_id = ?').get(serverId, tenantId)
+    : db.prepare('SELECT id FROM mcp_servers WHERE id = ?').get(serverId);
+  const server = query as { id: string } | undefined;
   if (!server) throw new AppError(404, `MCP server '${serverId}' not found`);
 
   const payload = encrypt(apiKey);
