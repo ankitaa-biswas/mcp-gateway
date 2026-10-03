@@ -2,18 +2,23 @@
 /**
  * benchmark.ts
  *
- * Measures MCP Gateway proxy throughput and latency using the real Express app
- * backed by an in-memory SQLite database and a stubbed downstream MCP server.
+ * Measures MCP Gateway throughput and latency on the REAL /mcp Streamable HTTP endpoint.
  *
- * Methodology (fully reproducible):
- *  - Real Express app started on a random free port (no mocking of routes/middleware)
+ * Architecture tested:
+ *   MCP Client (benchmark workers)
+ *     → POST /mcp (Streamable HTTP, JWT auth, RBAC, tenant isolation, safety blocklist, rate limiting, vault decryption)
+ *     → McpClientManager
+ *     → Downstream Streamable HTTP MCP Server (real MCP protocol)
+ *
+ * Methodology:
+ *  - Real Express app started on a free port (no mocking of routes/middleware)
  *  - In-memory SQLite (DB_PATH=:memory:) — isolated from dev data
- *  - Downstream MCP server: a tiny Express server responding in <1ms (localhost:0)
- *  - Warmed up with 20 sequential requests before measurement begins
+ *  - Downstream MCP server: Real MCP server over Streamable HTTP transport
+ *  - Warmed up with sequential requests before measurement begins
  *  - Measurement: CONCURRENCY workers each firing REQUESTS_PER_WORKER requests
  *  - Latency measured as time from request send to response received (HTTP round-trip)
  *  - Gateway overhead = total latency − downstream latency (measured separately)
- *  - Results printed as a plain table for easy copy/paste
+ *  - Reports: Throughput, P50, P95, P99, Min, Max, Errors.
  *
  * Run: npx ts-node --transpile-only src/scripts/benchmark.ts
  */
@@ -31,6 +36,9 @@ import http from 'http';
 import express from 'express';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 // Project imports (after env is set)
 import { initializeDatabase, getDatabase } from '../db/database';
@@ -38,12 +46,13 @@ import app from '../app';
 import { signToken } from '../utils/jwt';
 import { encrypt } from '../services/vaultService';
 import { __resetRateLimitStore } from '../middleware/safetyMiddleware';
+import { __resetRateLimitStoreMcp } from '../middleware/mcpSafetyHelpers';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const CONCURRENCY          = 20;  // parallel workers (one unique user each)
 const REQUESTS_PER_WORKER  = 15;  // calls each worker fires — stays under per-user rate limit
-const WARMUP_REQUESTS      = 20;  // sequential warm-up (2 additional warmup users used)
+const WARMUP_REQUESTS      = 20;  // sequential warm-up (dedicated warmup users)
 const TOTAL_MEASURED        = CONCURRENCY * REQUESTS_PER_WORKER;  // 300 requests
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -72,22 +81,42 @@ async function stopServer(server: http.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-// ── Downstream stub MCP server ─────────────────────────────────────────────────
+// ── Downstream Real MCP server over Streamable HTTP ──────────────────────────
 
-function createDownstreamStub(): express.Application {
-  const stub = express();
-  stub.use(express.json());
-  stub.post('/call', (_req, res) => {
-    res.json({ result: 'benchmark-response', status: 'ok' });
+function createDownstreamMcpServer(): express.Application {
+  const downstreamApp = express();
+  downstreamApp.use(express.json());
+
+  downstreamApp.all('/mcp', async (req, res) => {
+    const server = new McpServer({ name: 'bench-downstream', version: '1.0.0' });
+    (server as any).registerTool(
+      'search',
+      {
+        description: 'Benchmark search tool',
+        inputSchema: { q: z.string().optional() },
+      },
+      async (args: { q?: string }) => {
+        return {
+          content: [{ type: 'text', text: `result for ${args?.q ?? 'ok'}` }],
+        };
+      },
+    );
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
   });
-  return stub;
+
+  return downstreamApp;
 }
 
-// ── HTTP fetch helper (no fetch polyfill needed — uses Node http module) ───────
+// ── HTTP fetch helper ─────────────────────────────────────────────────────────
 
 interface TimedResult {
   status: number;
   latencyMs: number;
+  body: string;
 }
 
 function httpPost(host: string, port: number, path: string, body: unknown, headers: Record<string, string>): Promise<TimedResult> {
@@ -102,14 +131,16 @@ function httpPost(host: string, port: number, path: string, body: unknown, heade
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
         'Content-Length': Buffer.byteLength(payload),
         ...headers,
       },
     }, (res) => {
-      res.resume(); // drain
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         const latencyMs = Number(process.hrtime.bigint() - start) / 1_000_000;
-        resolve({ status: res.statusCode ?? 0, latencyMs });
+        resolve({ status: res.statusCode ?? 0, latencyMs, body: data });
       });
     });
 
@@ -123,9 +154,16 @@ function httpPost(host: string, port: number, path: string, body: unknown, heade
 
 async function measureDownstreamLatency(downstreamPort: number, samples = 50): Promise<number> {
   const latencies: number[] = [];
+  const reqBody = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: { name: 'search', arguments: { q: 'benchmark' } },
+  };
+
   for (let i = 0; i < samples; i++) {
     const start = process.hrtime.bigint();
-    await httpPost('127.0.0.1', downstreamPort, '/call', { tool: 'search', params: {} }, {});
+    await httpPost('127.0.0.1', downstreamPort, '/mcp', reqBody, {});
     latencies.push(Number(process.hrtime.bigint() - start) / 1_000_000);
   }
   return mean(latencies);
@@ -134,17 +172,19 @@ async function measureDownstreamLatency(downstreamPort: number, samples = 50): P
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('\n🔬 MCP Gateway Performance Benchmark');
-  console.log('════════════════════════════════════════');
+  console.log('\n🔬 MCP Gateway Performance Benchmark (Real MCP Protocol)');
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log(`  Path Tested        : POST /mcp (Streamable HTTP)`);
+  console.log(`  Downstream Protocol: Real MCP over Streamable HTTP`);
   console.log(`  Concurrency        : ${CONCURRENCY} workers`);
   console.log(`  Requests/worker    : ${REQUESTS_PER_WORKER}`);
   console.log(`  Total measured     : ${TOTAL_MEASURED} requests`);
   console.log(`  Warm-up            : ${WARMUP_REQUESTS} sequential requests`);
   console.log('');
 
-  // ── 1. Start downstream stub ───────────────────────────────────────────────
-  const { server: downstreamServer, port: downstreamPort } = await startServer(createDownstreamStub());
-  console.log(`✅ Downstream stub running on :${downstreamPort}`);
+  // ── 1. Start downstream real MCP server ────────────────────────────────────
+  const { server: downstreamServer, port: downstreamPort } = await startServer(createDownstreamMcpServer());
+  console.log(`✅ Downstream MCP server running on :${downstreamPort}/mcp`);
 
   // ── 2. Initialize DB + seed fixtures ──────────────────────────────────────
   initializeDatabase();
@@ -156,8 +196,6 @@ async function main() {
     .update('BenchPass1!' + (process.env['PASSWORD_SALT'] ?? 'bench-salt'))
     .digest('hex');
 
-  // Seed one synthetic user + credential per concurrent worker
-  // so no single userId exhausts the 20-req/min safety rate limit
   const serverId = uuidv4();
   const workers: Array<{ userId: string; token: string }> = [];
   const warmupWorkers: Array<{ userId: string; token: string }> = [];
@@ -169,16 +207,17 @@ async function main() {
     const adminId = uuidv4();
     db.prepare('INSERT INTO users (id, tenant_id, email, password_hash, role) VALUES (?, ?, ?, ?, ?)').run(adminId, tenantId, 'admin@bench.test', ph, 'admin');
 
-    // Seed the shared MCP server
+    // Seed the real MCP server
     db.prepare(`
-      INSERT INTO mcp_servers (id, tenant_id, name, base_url, capabilities, tool_schema, owner_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO mcp_servers (id, tenant_id, name, base_url, capabilities, tool_schema, owner_id, transport_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       serverId, tenantId, 'Bench Server',
-      `http://127.0.0.1:${downstreamPort}`,
-      JSON.stringify(['search']),
-      JSON.stringify({ tools: [{ name: 'search' }] }),
+      `http://127.0.0.1:${downstreamPort}/mcp`,
+      JSON.stringify(['tools']),
+      JSON.stringify({}),
       adminId,
+      'http',
     );
 
     // Create CONCURRENCY analyst users, each with their own credential
@@ -197,7 +236,7 @@ async function main() {
       workers.push({ userId, token: signToken({ userId, tenantId, email, role: 'analyst' }) });
     }
 
-    // 2 additional dedicated warm-up users (separate budget from measurement users)
+    // Dedicated warm-up users
     for (let i = 0; i < 2; i++) {
       const userId = uuidv4();
       const email  = `bench-warmup-${i}@test.com`;
@@ -211,7 +250,7 @@ async function main() {
       warmupWorkers.push({ userId, token: signToken({ userId, tenantId, email, role: 'analyst' }) });
     }
 
-    // Seed default blocklist so safety middleware doesn't crash
+    // Seed default blocklist
     const blocked = [
       ['shell_exec', 'RCE risk'], ['delete_all', 'Destructive'],
       ['rm_rf', 'FS risk'], ['eval_code', 'Code exec'], ['system_call', 'OS access'],
@@ -220,43 +259,83 @@ async function main() {
     for (const [n, r] of blocked) ins.run(n, r);
   })();
 
-  console.log(`✅ Fixtures seeded: ${CONCURRENCY} workers × 1 user+credential each (avoids rate-limit ceiling)`);
+  console.log(`✅ Fixtures seeded: ${CONCURRENCY} workers × 1 user+credential each`);
 
   // ── 3. Start gateway ───────────────────────────────────────────────────────
   const { server: gatewayServer, port: gatewayPort } = await startServer(app);
-  console.log(`✅ Gateway running on :${gatewayPort}\n`);
+  console.log(`✅ Gateway running on :${gatewayPort}/mcp\n`);
 
-  const body = { tool: 'search', params: { q: 'benchmark' } };
-  const proxyPath = `/api/proxy/${serverId}/call`;
+  // Gateway namespaced tool name: "bench_server__search"
+  const mcpToolName = 'bench_server__search';
+  const mcpCallPayload = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: mcpToolName,
+      arguments: { q: 'benchmark' },
+    },
+  };
 
   // ── 4. Warm-up ─────────────────────────────────────────────────────────────
-  process.stdout.write('🔥 Warming up (dedicated warm-up user pool)');
+  process.stdout.write('🔥 Warming up (initial tool discovery + sequential calls)');
+
+  // Initial tool discovery via tools/list
+  await httpPost('127.0.0.1', gatewayPort, '/mcp', {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/list',
+    params: {},
+  }, { Authorization: `Bearer ${warmupWorkers[0].token}` });
+
   for (let i = 0; i < WARMUP_REQUESTS; i++) {
     const w = warmupWorkers[i % warmupWorkers.length];
-    await httpPost('127.0.0.1', gatewayPort, proxyPath, body, { Authorization: `Bearer ${w.token}` });
+    await httpPost('127.0.0.1', gatewayPort, '/mcp', mcpCallPayload, { Authorization: `Bearer ${w.token}` });
     process.stdout.write('.');
   }
   console.log(' done\n');
 
-  // Reset rate-limit store after warmup so measurement workers start with a clean window
+  // Reset rate-limit stores
   __resetRateLimitStore();
+  __resetRateLimitStoreMcp();
 
   // ── 5. Measure downstream-only latency (baseline) ─────────────────────────
   const downstreamMeanMs = await measureDownstreamLatency(downstreamPort);
 
-  // ── 6. Benchmark ─────────────────────────────────────────────────────
+  // ── 6. Benchmark ──────────────────────────────────────────────────────────
   console.log(`📊 Running ${TOTAL_MEASURED} measured requests (${CONCURRENCY} concurrent workers, 1 user each)...`);
 
   const allLatencies: number[] = [];
+  let errorCount = 0;
   const benchStart = process.hrtime.bigint();
 
   await Promise.all(
     workers.map(async (w, idx) => {
       const authHeader = { Authorization: `Bearer ${w.token}` };
       for (let i = 0; i < REQUESTS_PER_WORKER; i++) {
-        const r = await httpPost('127.0.0.1', gatewayPort, proxyPath, body, authHeader);
-        if (r.status !== 200) {
-          console.warn(`  ⚠️  Unexpected status ${r.status} (worker ${idx})`);
+        const r = await httpPost('127.0.0.1', gatewayPort, '/mcp', {
+          ...mcpCallPayload,
+          id: i + 1,
+        }, authHeader);
+
+        let isErr = r.status !== 200;
+        if (!isErr) {
+          try {
+            const bodyObj = JSON.parse(r.body);
+            if (bodyObj.error || bodyObj.result?.isError === true) {
+              isErr = true;
+            }
+          } catch {
+            // body could be SSE
+            if (r.body.includes('"isError":true') || r.body.includes('"error":{')) {
+              isErr = true;
+            }
+          }
+        }
+
+        if (isErr) {
+          errorCount++;
+          console.warn(`  ⚠️  Unexpected status or error in response: status=${r.status} (worker ${idx})`);
         }
         allLatencies.push(r.latencyMs);
       }
@@ -278,11 +357,13 @@ async function main() {
 
   // ── 8. Print results ───────────────────────────────────────────────────────
   console.log('\n════════════════════════════════════════════════════════');
-  console.log(' MCP GATEWAY BENCHMARK RESULTS');
+  console.log(' REAL MCP GATEWAY BENCHMARK RESULTS');
   console.log('════════════════════════════════════════════════════════');
+  console.log(`  Endpoint            : POST /mcp (Streamable HTTP)`);
   console.log(`  Total requests      : ${TOTAL_MEASURED}`);
   console.log(`  Concurrency         : ${CONCURRENCY} workers`);
   console.log(`  Wall-clock time     : ${totalMs.toFixed(0)} ms`);
+  console.log(`  Errors              : ${errorCount} (${((errorCount / TOTAL_MEASURED) * 100).toFixed(1)}%)`);
   console.log('');
   console.log(`  Throughput          : ${reqPerSec} req/sec`);
   console.log('');
@@ -294,8 +375,8 @@ async function main() {
   console.log(`    Min               : ${minLatencyMs.toFixed(2)} ms`);
   console.log(`    Max               : ${maxLatencyMs.toFixed(2)} ms`);
   console.log('');
-  console.log(`  Downstream baseline : ${downstreamMeanMs.toFixed(2)} ms (stub MCP server, no auth)`);
-  console.log(`  Gateway overhead    : ${gatewayOverhead.toFixed(2)} ms  ← JWT+RBAC+safety+vault+SQLite`);
+  console.log(`  Downstream baseline : ${downstreamMeanMs.toFixed(2)} ms (real MCP server over Streamable HTTP)`);
+  console.log(`  Gateway overhead    : ${gatewayOverhead.toFixed(2)} ms  ← MCP routing + JWT + RBAC + safety + vault + SQLite`);
   console.log('════════════════════════════════════════════════════════');
   console.log('');
 

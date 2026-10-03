@@ -21,6 +21,10 @@ interface ServerRow {
   tenant_id: string;
   created_at: string;
   updated_at: string;
+  transport_type: string | null;
+  stdio_command: string | null;
+  stdio_args: string | null;
+  stdio_env: string | null;
 }
 
 function parseServer(row: ServerRow) {
@@ -29,6 +33,8 @@ function parseServer(row: ServerRow) {
     is_active: Boolean(row.is_active),
     capabilities: JSON.parse(row.capabilities) as string[],
     tool_schema: JSON.parse(row.tool_schema) as Record<string, unknown>,
+    transport_type: row.transport_type ?? 'legacy_http',
+    stdio_args: row.stdio_args ? (JSON.parse(row.stdio_args) as string[]) : null,
   };
 }
 
@@ -39,6 +45,11 @@ const RegisterServerSchema = z.object({
   base_url: z.string().url('base_url must be a valid URL'),
   capabilities: z.array(z.string()).default([]),
   tool_schema: z.record(z.unknown()).default({}),
+  // MCP transport configuration (v2)
+  transport_type: z.enum(['stdio', 'http', 'legacy_http']).default('legacy_http'),
+  stdio_command: z.string().optional(),
+  stdio_args: z.array(z.string()).optional(),
+  // stdio_env is intentionally NOT accepted in body — provide via server config, not client-supplied JSON
 });
 
 // ── GET /api/servers ─────────────────────────────────────────────────────────
@@ -119,8 +130,9 @@ registryRouter.post(
       const id = uuidv4();
       db.prepare(`
         INSERT INTO mcp_servers
-          (id, tenant_id, name, base_url, capabilities, tool_schema, owner_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (id, tenant_id, name, base_url, capabilities, tool_schema, owner_id,
+           transport_type, stdio_command, stdio_args)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         req.user!.tenantId,
@@ -129,6 +141,9 @@ registryRouter.post(
         JSON.stringify(body.capabilities),
         JSON.stringify(body.tool_schema),
         req.user!.userId,
+        body.transport_type,
+        body.stdio_command ?? null,
+        body.stdio_args ? JSON.stringify(body.stdio_args) : null,
       );
 
       const created = db

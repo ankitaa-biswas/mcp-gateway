@@ -138,6 +138,11 @@ function runMigrations(database: Database.Database): void {
   const alterGuards = [
     `ALTER TABLE mcp_servers ADD COLUMN tool_schema TEXT NOT NULL DEFAULT '{}'`,
     `ALTER TABLE mcp_servers ADD COLUMN owner_id TEXT`,
+    // MCP transport configuration columns (added in v2 migration)
+    `ALTER TABLE mcp_servers ADD COLUMN transport_type TEXT NOT NULL DEFAULT 'legacy_http'`,
+    `ALTER TABLE mcp_servers ADD COLUMN stdio_command TEXT`,
+    `ALTER TABLE mcp_servers ADD COLUMN stdio_args TEXT`,
+    `ALTER TABLE mcp_servers ADD COLUMN stdio_env TEXT`,
   ];
   for (const sql of alterGuards) {
     try { database.exec(sql); } catch { /* column already exists */ }

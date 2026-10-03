@@ -12,6 +12,7 @@ import { vaultRouter } from './routes/vault.routes';
 import { registryRouter } from './routes/registry.routes';
 import { proxyRouter } from './routes/proxy.routes';
 import { adminRouter } from './routes/admin.routes';
+import { mcpGatewayRouter } from './routes/mcpGateway.routes';
 import { errorHandler } from './middleware/errorHandler';
 import { logger } from './utils/logger';
 
@@ -52,8 +53,13 @@ app.use('/api/tenants', tenantsRouter);
 app.use('/api/mcp', mcpRouter);
 app.use('/api/vault', vaultRouter);
 app.use('/api/servers', registryRouter);  // MCP Server Registry
-app.use('/api/proxy', proxyRouter);        // MCP Proxy + Safety layer
+app.use('/api/proxy', proxyRouter);        // Legacy proxy (kept for backward compat)
 app.use('/api/admin', adminRouter);        // Admin: logs, blocklist, user mgmt
+
+// ── MCP Gateway — real MCP protocol endpoint ─────────────────────────────────
+// POST /mcp implements the MCP Streamable HTTP transport specification.
+// Clients connect here with proper MCP initialize / tools/list / tools/call.
+app.use('/mcp', mcpGatewayRouter);
 
 // ── 404 handler ──────────────────────────────────────────────────────────────
 app.use((_req: Request, res: Response) => {
