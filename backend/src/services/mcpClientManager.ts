@@ -75,18 +75,19 @@ class McpClientManager {
   async getClient(cfg: DownstreamServerConfig, apiKey?: string): Promise<Client | null> {
     if (cfg.transport_type === 'legacy_http') return null;
 
-    if (this._clients.has(cfg.id)) return this._clients.get(cfg.id)!;
-    if (this._pendingConnects.has(cfg.id)) return this._pendingConnects.get(cfg.id)!;
+    const cacheKey = apiKey ? `${cfg.id}:${apiKey}` : cfg.id;
+    if (this._clients.has(cacheKey)) return this._clients.get(cacheKey)!;
+    if (this._pendingConnects.has(cacheKey)) return this._pendingConnects.get(cacheKey)!;
 
     const connectPromise = this._connect(cfg, apiKey);
-    this._pendingConnects.set(cfg.id, connectPromise);
+    this._pendingConnects.set(cacheKey, connectPromise);
 
     try {
       const client = await connectPromise;
-      this._clients.set(cfg.id, client);
+      this._clients.set(cacheKey, client);
       return client;
     } finally {
-      this._pendingConnects.delete(cfg.id);
+      this._pendingConnects.delete(cacheKey);
     }
   }
 
@@ -163,7 +164,8 @@ class McpClientManager {
       throw new Error(`Unknown gateway tool: ${gatewayToolName}`);
     }
 
-    let client = this._clients.get(route.serverId);
+    const cacheKey = apiKey ? `${route.serverId}:${apiKey}` : route.serverId;
+    let client = this._clients.get(cacheKey);
     if (!client && cfg) {
       const connected = await this.getClient(cfg, apiKey);
       if (connected) client = connected;
@@ -199,10 +201,11 @@ class McpClientManager {
    * Disconnect a specific server and clean up its routes.
    */
   async disconnectServer(serverId: string, tenantId?: string): Promise<void> {
-    const client = this._clients.get(serverId);
-    if (client) {
-      try { await client.close(); } catch { /* ignore */ }
-      this._clients.delete(serverId);
+    for (const [key, client] of this._clients.entries()) {
+      if (key === serverId || key.startsWith(`${serverId}:`)) {
+        try { await client.close(); } catch { /* ignore */ }
+        this._clients.delete(key);
+      }
     }
 
     // Remove all routes for this server
@@ -215,6 +218,18 @@ class McpClientManager {
       const existing = this._tenantTools.get(tenantId) ?? [];
       this._tenantTools.set(tenantId, existing.filter(t => t.serverId !== serverId));
     }
+  }
+
+  /**
+   * Close all connected clients and clear routing tables.
+   */
+  async closeAll(): Promise<void> {
+    for (const [key, client] of this._clients.entries()) {
+      try { await client.close(); } catch { /* ignore */ }
+      this._clients.delete(key);
+    }
+    this._toolRoute.clear();
+    this._tenantTools.clear();
   }
 
   /**

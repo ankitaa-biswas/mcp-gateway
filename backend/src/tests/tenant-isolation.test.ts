@@ -90,6 +90,7 @@ describe('Multi-tenant isolation — credential vault', () => {
       .set('Authorization', `Bearer ${TOKENS.adminA()}`);
 
     expect(res.status).toBe(404);
+    expect(JSON.stringify(res.body)).not.toContain('b-secret-key');
   });
 
   it('Tenant A cannot delete Tenant B credentials', async () => {

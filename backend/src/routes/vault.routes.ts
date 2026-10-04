@@ -1,7 +1,7 @@
 import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { authenticate, AuthRequest } from '../middleware/auth.middleware';
-import { storeKey, getKey, deleteKey, getKeysForUser } from '../services/vaultService';
+import { storeKey, deleteKey, getKeysForUser } from '../services/vaultService';
 import { AppError } from '../middleware/errorHandler';
 
 export const vaultRouter = Router();
@@ -37,32 +37,6 @@ vaultRouter.post('/store', (req: AuthRequest, res: Response, next: NextFunction)
       message: 'API key encrypted and stored successfully',
       credential_id: result.id,
       server_id,
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ── GET /api/vault/retrieve/:serverId ─────────────────────────────────────────
-/**
- * Decrypt and return the stored API key for the authenticated user.
- *
- * The decrypted key is returned once per request; it is never cached.
- * Callers should treat the response as a secret and not log it.
- */
-vaultRouter.get('/retrieve/:serverId', (req: AuthRequest, res: Response, next: NextFunction) => {
-  try {
-    const { serverId } = req.params;
-    if (!serverId) throw new AppError(400, 'serverId param is required');
-
-    const userId = req.user!.userId;
-    const apiKey = getKey(userId, serverId);
-
-    res.json({
-      server_id: serverId,
-      api_key: apiKey,
-      // Remind consumers this is sensitive
-      _note: 'Handle this value as a secret. Do not log or expose it.',
     });
   } catch (err) {
     next(err);

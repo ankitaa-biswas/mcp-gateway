@@ -622,6 +622,103 @@ describe('MCP Gateway — credential protection & secret leakage', () => {
     const responseStr = JSON.stringify(callRes.body) + callRes.text;
     expect(responseStr).not.toContain(SECRET_KEY);
   });
+
+  it('MCP tool execution retrieves credential internally from vault and successfully passes it downstream without exposing it', async () => {
+    const express = (await import('express')).default;
+    const http = (await import('http')).default;
+    const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+    const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+    const { z } = await import('zod');
+
+    const SECRET_KEY = 'SECURE_DOWNSTREAM_TOKEN_XYZ';
+    let downstreamReceivedAuth = false;
+
+    const downstreamApp = express();
+    downstreamApp.use(express.json());
+
+    downstreamApp.all('/mcp', async (req, res) => {
+      const auth = req.headers['authorization'];
+      if (auth === `Bearer ${SECRET_KEY}`) {
+        downstreamReceivedAuth = true;
+      }
+      const server = new McpServer({ name: 'auth-weather', version: '1.0.0' });
+      (server as any).registerTool('check_secure_weather', {
+        description: 'Secure weather tool',
+        inputSchema: { city: z.string() },
+      }, async (args: any) => {
+        return { content: [{ type: 'text', text: `authenticated weather for ${args.city}` }] };
+      });
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    const httpServer = http.createServer(downstreamApp);
+    await new Promise<void>(resolve => httpServer.listen(0, '127.0.0.1', () => resolve()));
+    const port = (httpServer.address() as { port: number }).port;
+    const remoteUrl = `http://127.0.0.1:${port}/mcp`;
+
+    const remoteServerId = uuidv4();
+    const db = getDatabase();
+
+    db.prepare(`
+      INSERT INTO mcp_servers
+        (id, tenant_id, name, base_url, capabilities, tool_schema, owner_id, transport_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      remoteServerId,
+      IDS.tenantA,
+      'Secure Weather Remote',
+      remoteUrl,
+      JSON.stringify(['weather']),
+      JSON.stringify({}),
+      IDS.adminA,
+      'http',
+    );
+
+    seedCredential(IDS.analystA, remoteServerId, SECRET_KEY);
+
+    try {
+      // 1. Verify GET /api/vault/retrieve/:id is NOT available (404)
+      const retrieveRes = await request(app)
+        .get(`/api/vault/retrieve/${remoteServerId}`)
+        .set('Authorization', `Bearer ${TOKENS.analystA()}`);
+      expect(retrieveRes.status).toBe(404);
+      expect(JSON.stringify(retrieveRes.body)).not.toContain(SECRET_KEY);
+
+      // 2. Discover tool via tools/list
+      const listRes = await sendMcpRequest(TOKENS.analystA(), mcpRequest('tools/list'));
+      const listBody = parseResponseBody(listRes);
+      const tools = listBody.result.tools as Array<{ name: string }>;
+      const weatherTool = tools.find(t => t.name.includes('check_secure_weather'));
+      expect(weatherTool).toBeDefined();
+
+      // 3. Call tool through gateway — gateway must internally fetch and inject the credential
+      const callRes = await sendMcpRequest(TOKENS.analystA(), mcpRequest('tools/call', {
+        name: weatherTool!.name,
+        arguments: { city: 'Berlin' },
+      }));
+
+      expect(callRes.status).toBe(200);
+      const callBody = parseResponseBody(callRes);
+      expect(downstreamReceivedAuth).toBe(true);
+      expect(callBody.result?.content?.[0]?.text).toContain('authenticated weather for Berlin');
+
+      // 4. Response body and audit logs do not leak the secret key
+      const responseStr = JSON.stringify(callRes.body) + callRes.text;
+      expect(responseStr).not.toContain(SECRET_KEY);
+
+      const log = db
+        .prepare('SELECT input_params, output FROM tool_call_logs WHERE user_id = ? AND tool_name = ? ORDER BY timestamp DESC LIMIT 1')
+        .get(IDS.analystA, 'check_secure_weather') as { input_params: string; output: string } | undefined;
+      expect(log).toBeDefined();
+      expect(log!.input_params).not.toContain(SECRET_KEY);
+      expect(log!.output).not.toContain(SECRET_KEY);
+    } finally {
+      await mcpClientManager.disconnectServer(remoteServerId, IDS.tenantA);
+      await new Promise<void>(resolve => httpServer.close(() => resolve()));
+    }
+  });
 });
 
 // ── Tenant isolation ──────────────────────────────────────────────────────────

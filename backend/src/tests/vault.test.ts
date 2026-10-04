@@ -20,7 +20,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import { createTestApp } from './helpers/testApp';
 import { seedFixtures, seedCredential, TOKENS, IDS } from './helpers/fixtures';
-import { encrypt, decrypt } from '../services/vaultService';
+import { encrypt, decrypt, getKey } from '../services/vaultService';
 import { v4 as uuidv4 } from 'uuid';
 
 const app = createTestApp();
@@ -90,7 +90,7 @@ describe('Vault HTTP routes', () => {
     expect(res.body.server_id).toBe(IDS.serverA);
   });
 
-  it('GET /api/vault/retrieve/:id returns the correct decrypted key', async () => {
+  it('GET /api/vault/retrieve/:id is removed and returns 404 (no plaintext credential API endpoint)', async () => {
     const SECRET = 'round-trip-secret-99';
     seedCredential(IDS.adminA, IDS.serverA, SECRET);
 
@@ -98,29 +98,22 @@ describe('Vault HTTP routes', () => {
       .get(`/api/vault/retrieve/${IDS.serverA}`)
       .set('Authorization', `Bearer ${TOKENS.adminA()}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body.api_key).toBe(SECRET);
-    expect(res.body.server_id).toBe(IDS.serverA);
-  });
-
-  it('GET /api/vault/retrieve/:id returns 404 for missing credential', async () => {
-    const res = await request(app)
-      .get(`/api/vault/retrieve/${IDS.serverA}`)
-      .set('Authorization', `Bearer ${TOKENS.adminA()}`);
-
     expect(res.status).toBe(404);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain(SECRET);
   });
 
-  it('GET /api/vault/retrieve with nonexistent UUID returns 404', async () => {
-    const res = await request(app)
-      .get(`/api/vault/retrieve/${uuidv4()}`)
-      .set('Authorization', `Bearer ${TOKENS.adminA()}`);
+  it('vaultService.getKey internally decrypts the stored key without exposing it over HTTP', () => {
+    const SECRET = 'internal-round-trip-secret';
+    seedCredential(IDS.adminA, IDS.serverA, SECRET);
 
-    expect(res.status).toBe(404);
+    const decrypted = getKey(IDS.adminA, IDS.serverA);
+    expect(decrypted).toBe(SECRET);
   });
 
-  it('GET /api/vault/keys lists server IDs for which the user has credentials', async () => {
-    seedCredential(IDS.adminA, IDS.serverA, 'key-for-serverA');
+  it('GET /api/vault/keys lists server IDs and never exposes secret keys or ciphertexts', async () => {
+    const SECRET = 'key-for-serverA-secret';
+    seedCredential(IDS.adminA, IDS.serverA, SECRET);
 
     const res = await request(app)
       .get('/api/vault/keys')
@@ -129,6 +122,8 @@ describe('Vault HTTP routes', () => {
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
     expect(res.body).toContain(IDS.serverA);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain(SECRET);
   });
 
   it('DELETE /api/vault/:id removes the credential (200)', async () => {
@@ -139,11 +134,14 @@ describe('Vault HTTP routes', () => {
       .set('Authorization', `Bearer ${TOKENS.adminA()}`);
     expect(delRes.status).toBe(200);
 
-    // Confirm it is gone
-    const getRes = await request(app)
-      .get(`/api/vault/retrieve/${IDS.serverA}`)
+    // Confirm it is gone internally from vault
+    expect(() => getKey(IDS.adminA, IDS.serverA)).toThrow();
+
+    // Confirm it is gone from user key list
+    const keysRes = await request(app)
+      .get('/api/vault/keys')
       .set('Authorization', `Bearer ${TOKENS.adminA()}`);
-    expect(getRes.status).toBe(404);
+    expect(keysRes.body).not.toContain(IDS.serverA);
   });
 
   it('DELETE /api/vault/:id for nonexistent credential returns 404', async () => {

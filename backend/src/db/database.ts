@@ -13,6 +13,12 @@ export function getDatabase(): Database.Database {
   return db;
 }
 
+export function closeDatabase(): void {
+  if (db && db.open) {
+    db.close();
+  }
+}
+
 export function initializeDatabase(): void {
   db = new Database(DB_PATH);
 
